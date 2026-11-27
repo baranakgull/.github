@@ -1,0 +1,103 @@
+# Reusable CI for Python projects managed with uv.
+# Call it from a repository's .github/workflows/ci.yml; see README.md for an example.
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version for the test job
+        type: string
+        default: "3.12"
+      working-directory:
+        description: Folder that holds pyproject.toml and uv.lock
+        type: string
+        default: "."
+      test-command:
+        description: Command that runs the tests
+        type: string
+        default: uv run pytest
+      lint-select:
+        description: "Ruff rules that fail the build (default: syntax errors and undefined names only)"
+        type: string
+        default: E9,F63,F7,F82
+      bandit-paths:
+        description: Space-separated paths Bandit scans; empty skips Bandit
+        type: string
+        default: "."
+      bandit-severity:
+        description: Lowest Bandit severity that fails the build (low, medium, high)
+        type: string
+        default: high
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+      # --locked fails when uv.lock is out of date with pyproject.toml instead of silently re-resolving
+      - run: uv sync --locked
+      - name: Run tests
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - name: Ruff
+        env:
+          LINT_SELECT: ${{ inputs.lint-select }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: uvx ruff check --isolated --select "$LINT_SELECT" --output-format=github "$WORKDIR"
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read  # gitleaks lists the commits of the PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # gitleaks scans the commits a push or PR adds
+          persist-credentials: false
+      - name: Secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - name: Vulnerable dependencies (pip-audit)
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          uv export --frozen --no-emit-project --no-hashes --format requirements-txt -o "$RUNNER_TEMP/req.txt"
+          uvx pip-audit -r "$RUNNER_TEMP/req.txt" --no-deps --disable-pip --progress-spinner off
+      - name: Code (bandit)
+        if: inputs.bandit-paths != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BANDIT_PATHS: ${{ inputs.bandit-paths }}
+          BANDIT_SEVERITY: ${{ inputs.bandit-severity }}
+        # BANDIT_PATHS is left unquoted on purpose: it holds several space-separated paths
+        run: uvx bandit -q -r $BANDIT_PATHS -x ./.venv,./tests --severity-level "$BANDIT_SEVERITY" --confidence-level medium
