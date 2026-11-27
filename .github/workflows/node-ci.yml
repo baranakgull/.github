@@ -1,0 +1,94 @@
+# Reusable CI for Node.js projects (npm).
+# Call it from a repository's .github/workflows/ci.yml; see README.md for an example.
+name: Node CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version
+        type: string
+        default: "22"
+      working-directory:
+        description: Folder that holds package.json and package-lock.json
+        type: string
+        default: "."
+      test-command:
+        description: Command that runs the tests; empty skips the step
+        type: string
+        default: npm test
+      lint-command:
+        description: Command that runs the linter; empty skips the step
+        type: string
+        default: ""
+      build-command:
+        description: Command that builds the project; empty skips the step
+        type: string
+        default: ""
+      audit-level:
+        description: Lowest npm audit severity that fails the build (low, moderate, high, critical)
+        type: string
+        default: high
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      # --ignore-scripts: install scripts of dependencies do not run in CI
+      - run: npm ci --ignore-scripts
+      - name: Lint
+        if: inputs.lint-command != ''
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        run: eval "$LINT_COMMAND"
+      - name: Build
+        if: inputs.build-command != ''
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: eval "$BUILD_COMMAND"
+      - name: Run tests
+        if: inputs.test-command != ''
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read  # gitleaks lists the commits of the PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Vulnerable dependencies (npm audit)
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+        run: npm audit --omit=dev --audit-level="$AUDIT_LEVEL"
